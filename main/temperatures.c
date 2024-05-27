@@ -106,6 +106,11 @@ char *temperatures_info()
     return temperatureInfo;
 }
 
+char *temperature_getsensor(int index)
+{
+    return sensors[index].sensorname;
+}
+
 bool temperature_send(char *prefix, struct measurement *data, esp_mqtt_client_handle_t client)
 {
     time_t now;
@@ -140,7 +145,7 @@ static void getFirstTemperatures()
             if (sensors[i].prev != 0.0) continue;
             vTaskDelay(1000 / portTICK_PERIOD_MS);
             temperature = ds18b20_getTempC((DeviceAddress *) sensors[i].addr) + 1.0;
-            if (temperature < -10.0 || temperature > 85.0) {
+            if (temperature < -30.0 || temperature > 85.0) {
                 ESP_LOGI(TAG,"%s failed with initial value %f, reading again", sensors[i].sensorname, temperature);
             }
             else {
@@ -154,13 +159,22 @@ static void getFirstTemperatures()
     }
 }
 
-static void sendMeasurement(int gpio, float value)
+static void sendMeasurement(int index, float value)
 {
     struct measurement meas;
     meas.id = TEMPERATURE;
-    meas.gpio = gpio;
+    meas.gpio = index;
     meas.data.temperature = value;
     xQueueSend(evt_queue, &meas, 0);
+}
+
+
+void temperature_sendall(void)
+{
+    for (int i = 0; i < tempSensorCnt; i++)
+    {
+        sendMeasurement(i, sensors[i].lastValid);
+    }
 }
 
 

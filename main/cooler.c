@@ -23,6 +23,8 @@ static char *coolerprefix;
 static uint8_t *chipid;
 static bool currentstate;
 static char coolerTopic[64];
+static int mintime = 120;
+static time_t started;
 
 static const char *TAG = "COOLER";
 
@@ -39,7 +41,7 @@ void cooler_init(char *prefix, uint8_t *chip, int gpio)
 }
 
 
-void cooler_settarget(float start, float hyst)
+void cooler_setup(float start, float hyst, int mintime)
 {
     startTemp = start;
     hysteresis = hyst;
@@ -49,20 +51,32 @@ void cooler_settarget(float start, float hyst)
 void cooler_check(float temperature)
 {
     bool state = false;
+    time_t now;
 
-    if (temperature > startTemp) 
+    time(&now);
+    if (temperature > startTemp && state == false)
     {
         ESP_LOGI(TAG,"temperature bigger than %f -> state=true", startTemp);
+        started = now;
         state = true;
     }
-    else if (temperature < (startTemp - hysteresis)) 
+    else if (temperature < (startTemp - hysteresis) && state == true)
     {
-        ESP_LOGI(TAG,"temperature is smaller than %f -> state=false", startTemp - hysteresis);
-        state = false;
-    }    
+        int runtime = now - started;
+        if (runtime > mintime)
+        {
+            ESP_LOGI(TAG,"temperature is smaller than %f -> state=false", startTemp - hysteresis);
+            state = false;
+        }
+        else
+        {
+            ESP_LOGI(TAG,"runtime is only %d seconds, keeping compressor on", runtime);
+            return;
+        }
+    }
     else
         return;
-        
+
     if (state != currentstate)
     {
         gpio_set_level(coolergpio, state);    

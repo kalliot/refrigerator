@@ -68,7 +68,38 @@ struct netinfo {
 };
 
 
+struct config {
+    float temperature;
+    float hysteresis;
+    int mintimeon;
+    float lopriceboost;
+    float hipricereduce;
+    char fridgesensor[20];
+};
+
+struct config setup =
+{
+    .temperature = 8,
+    .hysteresis = 2,
+    .mintimeon = 120,
+    .lopriceboost = 1,
+    .hipricereduce = 1
+};
+
+struct specialTemperature
+{
+    char timestr[11];
+    float price;
+};
+
+
 // globals
+
+struct specialTemperature *hitemp = NULL;
+struct specialTemperature *lotemp = NULL;
+int hitempcnt = 0;
+int lotempcnt = 0;
+
 
 struct netinfo *comminfo;
 QueueHandle_t evt_queue = NULL;
@@ -84,11 +115,12 @@ uint16_t sensorerrors = 0;
 static char statisticsTopic[64];
 static char readTopic[64];
 static char otaUpdateTopic[64];
+static char elpriceTopic[64];
 static time_t started;
 static uint16_t maxQElements = 0;
 static int retry_num = 0;
 static char *program_version = "";
-
+static float elpriceInfluence = 0.0;
 
 
 static void sendStatistics(esp_mqtt_client_handle_t client, uint8_t *chipid, time_t now);
@@ -134,12 +166,143 @@ static bool getJsonFloat(cJSON *js, char *name, float *val)
     return ret;
 }
 
+static bool getJsonInt(cJSON *js, char *name, int *val)
+{
+    bool ret = false;
+
+    cJSON *item = cJSON_GetObjectItem(js, name);
+    if (item != NULL)
+    {
+        if (cJSON_IsNumber(item))
+        {
+            if (item->valueint != *val)
+            {
+                ret = true;
+                *val = item->valueint;
+            }
+            else ESP_LOGI(TAG,"%s is not changed", name);
+        }
+        else ESP_LOGI(TAG,"%s is not a number", name);
+    }
+    else ESP_LOGI(TAG,"%s not found from json", name);
+    return ret;
+}
+
 
 static void log_error_if_nonzero(const char *message, int error_code)
 {
     if (error_code != 0) {
         ESP_LOGE(TAG, "Last error %s: 0x%x", message, error_code);
     }
+}
+
+
+static struct specialTemperature *jsonToHiLoTable(cJSON *js, char *name, int *cnt, struct specialTemperature *tempArr)
+{
+    cJSON *item = cJSON_GetObjectItem(js, name);
+    int itemCnt=0;
+
+    if (item != NULL)
+    {
+        if (cJSON_IsArray(item))
+        {
+            itemCnt = cJSON_GetArraySize(item);
+
+            // table should be allocated or reallocated, if count of lines differ.
+            if (*cnt == 0 || itemCnt != *cnt) // we already had a table
+            {
+                *cnt = itemCnt;
+                if (tempArr != NULL)
+                {
+                    free(tempArr);   // array sizes are different, free old one and allocate a new one.
+                    tempArr = NULL;  // no array items in json.
+                }
+                if (itemCnt)
+                {
+                    tempArr = (struct specialTemperature *) malloc(itemCnt * sizeof(struct specialTemperature));
+                }
+            }
+            if (tempArr != NULL)
+            {
+                for (int i=0;i<itemCnt;i++)
+                {
+                    cJSON *elem = cJSON_GetArrayItem(item, i);
+                    if (elem != NULL)
+                    {
+                        cJSON *jstime = cJSON_GetObjectItem(elem, "time");
+                        if (jstime != NULL)
+                        {
+                            if (cJSON_IsString(jstime))
+                            {
+                                strcpy(tempArr[i].timestr,jstime->valuestring);
+                            }
+                        }
+
+                        cJSON *jsprice = cJSON_GetObjectItem(elem, "price");
+                        if (jsprice != NULL)
+                        {
+                            if (cJSON_IsNumber(jsprice))
+                            {
+                                tempArr[i].price = jsprice->valuedouble;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return tempArr;
+}
+
+static bool isInArray(char *str, struct specialTemperature *arr, int cnt)
+{
+    for (int i = 0; i < cnt; i++)
+    {
+        if (!strcmp(str,arr[i].timestr))
+            return true;
+    }
+    return false;
+}
+
+
+
+/* ../setsetup -m '{"temperature": 8, "hysteresis": 2, "mintimeon": 120, "lopriceboost": 2, "hipricereduce", 1}'
+*/
+
+static void readSetupJson(cJSON *root)
+{
+    bool reinit_needed = false;
+
+    if (getJsonFloat(root, "temperature", &setup.temperature))
+    {
+        flash_write_float("temperature", setup.temperature);
+        reinit_needed = true;
+    }
+    if (getJsonFloat(root, "hysteresis", &setup.hysteresis))
+    {
+        flash_write_float("hysteresis", setup.hysteresis);
+        reinit_needed = true;
+    }
+    if (getJsonInt(root, "mintimeon", &setup.mintimeon))
+    {
+        flash_write("mintimeon", setup.mintimeon);
+        reinit_needed = true;
+    }
+    if (getJsonFloat(root, "lopriceboost", &setup.lopriceboost))
+    {
+        flash_write_float("lopriceboost", setup.lopriceboost);
+        reinit_needed = true;
+    }
+    if (getJsonFloat(root, "lopriceboost", &setup.hipricereduce))
+    {
+        flash_write_float("lopriceboost", setup.hipricereduce);
+        reinit_needed = true;
+    }
+    if (reinit_needed)
+    {
+        cooler_setup(setup.temperature, setup.hysteresis, setup.mintimeon);
+    }
+    flash_commitchanges();
 }
 
 static bool handleJson(esp_mqtt_event_handle_t event)
@@ -162,20 +325,53 @@ static bool handleJson(esp_mqtt_event_handle_t event)
     }
     else if (!strcmp(id,"setup"))
     {
-        float temp = 8;
-        float hyst = 3;
-
-        if (getJsonFloat(root, "temperature", &temp))
-        {
-            flash_write_float("temperature", temp);
-        }    
-        if (getJsonFloat(root, "hysteresis", &hyst))
-        {
-            flash_write_float("hysteresis", hyst);
-        }    
-        flash_commitchanges();
+        readSetupJson(root);
         ret = true;
     }
+    else if (!strcmp(id,"sensorsetup"))
+    {
+        strncpy(setup.fridgesensor,getJsonStr(root,"fridgesensor"),20);
+        flash_write_str("fridgesensor", setup.fridgesensor);
+        ret = true;
+    }
+    else if (!strcmp(id,"elprice"))
+    {
+        char *topicpostfix = &event->topic[event->topic_len - 7];
+        if (!memcmp(topicpostfix,"current",7))
+        {
+            float newInfluence = 0.0;
+            char *daystr = getJsonStr(root,"day");
+            if (isInArray(daystr, hitemp, hitempcnt))
+            {
+                ESP_LOGI(TAG,"HITEMP IS ON!");
+                newInfluence = setup.lopriceboost;
+            }
+            else if (isInArray(daystr, lotemp, lotempcnt))
+            {
+                ESP_LOGI(TAG,"LOTEMP IS ON!");
+                newInfluence = -1.0 * setup.hipricereduce;
+            }
+            else
+            {
+                ESP_LOGI(TAG,"normal temperature is on");
+            }
+            if (newInfluence != elpriceInfluence)
+            {
+                elpriceInfluence = newInfluence;
+                ESP_LOGI(TAG,"changing target to %f", setup.temperature + elpriceInfluence);
+                cooler_setup(setup.temperature + elpriceInfluence, setup.hysteresis, setup.mintimeon);
+            }
+        }
+    }
+    else if (!strcmp(id,"awhightemp"))
+    {
+        hitemp = jsonToHiLoTable(root,"values", &hitempcnt, hitemp);
+    }
+    else if (!strcmp(id,"awlowtemp"))
+    {
+        lotemp = jsonToHiLoTable(root,"values", &lotempcnt, lotemp);
+    }
+
     cJSON_Delete(root);
     return ret;
 }
@@ -209,11 +405,16 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         msg_id = esp_mqtt_client_subscribe(client, otaUpdateTopic , 0);
         ESP_LOGI(TAG, "sent subscribe %s successful, msg_id=%d", otaUpdateTopic, msg_id);
 
+        msg_id = esp_mqtt_client_subscribe(client, elpriceTopic , 0);
+        ESP_LOGI(TAG, "sent subscribe %s successful, msg_id=%d", elpriceTopic, msg_id);
+
+
         gpio_set_level(MQTTSTATUS_GPIO, true);
         isConnected = true;
         connectcnt++;
         sendInfo(client, (uint8_t *) handler_args);
         sendSetup(client, (uint8_t *) handler_args);
+        temperature_sendall();
         break;
 
     case MQTT_EVENT_DISCONNECTED:
@@ -316,17 +517,29 @@ static void sendInfo(esp_mqtt_client_handle_t client, uint8_t *chipid)
     gpio_set_level(BLINK_GPIO, false);
 }
 
+/* ../setsetup -m '{"temperature": 8, "hysteresis": 2, "mintimeon": 120, "lopriceboost": 2, "hipricereduce", 1}'
+*/
+
 static void sendSetup(esp_mqtt_client_handle_t client, uint8_t *chipid)
 {
     gpio_set_level(BLINK_GPIO, true);
 
     char setupTopic[42];
+
     sprintf(setupTopic,"%s/refrigerator/%x%x%x/setup",
          comminfo->mqtt_prefix, chipid[3],chipid[4],chipid[5]);
-
-    sprintf(jsondata, "{\"dev\":\"%x%x%x\",\"id\":\"setup\",\"interval\":%d }",
+    sprintf(jsondata, "{\"dev\":\"%x%x%x\",\"id\":\"setup\",\"temperature\":%.2f,\"hysteresis\":%.2f,\"mintimeon\":%d,\"lopriceboost\":%.2f,\"hipricereduce\":%.2f }",
                 chipid[3],chipid[4],chipid[5],
-                10);
+                setup.temperature, setup.hysteresis, setup.mintimeon, setup.lopriceboost, setup.hipricereduce);
+    esp_mqtt_client_publish(client, setupTopic, jsondata , 0, 0, 1);
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+
+    sprintf(setupTopic,"%s/refrigerator/%x%x%x/sensorsetup",
+         comminfo->mqtt_prefix, chipid[3],chipid[4],chipid[5]);
+    sprintf(jsondata, "{\"dev\":\"%x%x%x\",\"id\":\"sensorsetup\",\"fridgesensor\":\"%s\"}",
+                chipid[3],chipid[4],chipid[5],
+                setup.fridgesensor);
+
     esp_mqtt_client_publish(client, setupTopic, jsondata , 0, 0, 1);
     sendcnt++;
     gpio_set_level(BLINK_GPIO, false);
@@ -470,6 +683,14 @@ void app_main(void)
         temperatures_init(TEMP_BUS, chipid);
         cooler_init(comminfo->mqtt_prefix, chipid, COOLER_BUS);
 
+        setup.temperature  = flash_read_float("temperature", setup.temperature);
+        setup.hysteresis   = flash_read_float("hysteresis", setup.hysteresis);
+        setup.mintimeon    = flash_read("mintimeon", setup.mintimeon);
+        setup.lopriceboost = flash_read_float("lopriceboost", setup.lopriceboost);
+        setup.hipricereduce= flash_read_float("hipricereduce", setup.hipricereduce);
+        strcpy(setup.fridgesensor, flash_read_str("fridgesensor", setup.fridgesensor,20));
+        cooler_setup(setup.temperature, setup.hysteresis, setup.mintimeon);
+
         esp_mqtt_client_handle_t client = mqtt_app_start(chipid);
         sntp_start();
         ESP_LOGI(TAG, "[APP] All init done, app_main, last line.");
@@ -484,12 +705,14 @@ void app_main(void)
         sprintf(readTopic,"%s/refrigerator/%x%x%x/setsetup",
             comminfo->mqtt_prefix, chipid[3],chipid[4],chipid[5]);
 
+        sprintf(elpriceTopic,"%s/elprice/#", comminfo->mqtt_prefix);
+
         program_version = ota_init(comminfo->mqtt_prefix, "refrigerator", chipid);
         // it is very propable, we will not get correct timestamp here.
         // It takes some time to get correct timestamp from ntp.
         time(&started);
         prevStatsTs = now = started;
-        cooler_settarget(25.7, 0.5);
+
 
         ESP_LOGI(TAG, "gpios: mqtt=%d wlan=%d",MQTTSTATUS_GPIO,WLANSTATUS_GPIO);
         while (1)
@@ -516,7 +739,10 @@ void app_main(void)
                 }
                 switch (meas.id) {
                     case TEMPERATURE:
-                        cooler_check(meas.data.temperature);
+                        if (!strcmp(setup.fridgesensor,temperature_getsensor(meas.gpio)))
+                        {
+                            cooler_check(meas.data.temperature);
+                        }
                         if (isConnected) temperature_send(comminfo->mqtt_prefix, &meas, client);
                     break;
 
