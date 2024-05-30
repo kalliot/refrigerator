@@ -79,11 +79,11 @@ struct config {
 
 struct config setup =
 {
-    .temperature = 8,
-    .hysteresis = 2,
-    .mintimeon = 120,
-    .lopriceboost = 1,
-    .hipricereduce = 1
+    .temperature    = 8,
+    .hysteresis     = 2,
+    .mintimeon      = 120,
+    .lopriceboost   = 1,
+    .hipricereduce  = 1
 };
 
 struct specialTemperature
@@ -106,7 +106,7 @@ QueueHandle_t evt_queue = NULL;
 char jsondata[256];
 uint16_t sendcnt = 0;
 
-static const char *TAG = "SENSORSET";
+static const char *TAG = "REFRIGERATOR";
 static bool isConnected = false;
 static uint16_t connectcnt = 0;
 static uint16_t disconnectcnt = 0;
@@ -265,6 +265,24 @@ static bool isInArray(char *str, struct specialTemperature *arr, int cnt)
 }
 
 
+/* ../setsetup -m '{"dev":"fd9030","id":"setsensorfriendlyname", "sensor": "28c1cf574e13c97", "name":"inside"}'
+   ../setsetup -m '{"dev":"fd9030","id":"setsensorfriendlyname", "sensor": "28524a256002a", "name": "outside"}'
+*/
+
+
+static void sensorFriendlyName(cJSON *root)
+{
+    char *sensorname;
+    char *friendlyname;
+
+    sensorname   = getJsonStr(root, "sensor");
+    friendlyname = getJsonStr(root, "name");
+    if (temperature_set_friendlyname(sensorname, friendlyname))
+    {
+        ESP_LOGD(TAG, "writing sensor %s, friendlyname %s to flash",sensorname, friendlyname);
+        flash_write_str(sensorname,friendlyname);
+    }
+}
 
 /* ../setsetup -m '{"temperature": 8, "hysteresis": 2, "mintimeon": 120, "lopriceboost": 2, "hipricereduce", 1}'
 */
@@ -305,6 +323,32 @@ static void readSetupJson(cJSON *root)
     flash_commitchanges();
 }
 
+void checkPriceInfluence(cJSON *root)
+{
+    float newInfluence = 0.0;
+    char *daystr = getJsonStr(root,"day");
+    if (isInArray(daystr, hitemp, hitempcnt))
+    {
+        ESP_LOGI(TAG,"Lo price, COOLER TEMP IS ON!");
+        newInfluence = -1 * setup.lopriceboost; // boost means cooler than normal
+    }
+    else if (isInArray(daystr, lotemp, lotempcnt))
+    {
+        ESP_LOGI(TAG,"Hi price, WARMER TEMP IS ON!");
+        newInfluence = setup.hipricereduce;
+    }
+    else
+    {
+        ESP_LOGI(TAG,"normal temperature is on");
+    }
+    if (newInfluence != elpriceInfluence)
+    {
+        elpriceInfluence = newInfluence;
+        ESP_LOGI(TAG,"changing target to %f", setup.temperature + elpriceInfluence);
+        cooler_setup(setup.temperature + elpriceInfluence, setup.hysteresis, setup.mintimeon);
+    }
+}
+
 static bool handleJson(esp_mqtt_event_handle_t event)
 {
     cJSON *root = cJSON_Parse(event->data);
@@ -334,33 +378,17 @@ static bool handleJson(esp_mqtt_event_handle_t event)
         flash_write_str("fridgesensor", setup.fridgesensor);
         ret = true;
     }
+    else if (!strcmp(id,"sensorfriendlyname"))
+    {
+        sensorFriendlyName(root);
+    }
     else if (!strcmp(id,"elprice"))
     {
+        // only topic name is different from the hour topics.
         char *topicpostfix = &event->topic[event->topic_len - 7];
         if (!memcmp(topicpostfix,"current",7))
         {
-            float newInfluence = 0.0;
-            char *daystr = getJsonStr(root,"day");
-            if (isInArray(daystr, hitemp, hitempcnt))
-            {
-                ESP_LOGI(TAG,"HITEMP IS ON!");
-                newInfluence = setup.lopriceboost;
-            }
-            else if (isInArray(daystr, lotemp, lotempcnt))
-            {
-                ESP_LOGI(TAG,"LOTEMP IS ON!");
-                newInfluence = -1.0 * setup.hipricereduce;
-            }
-            else
-            {
-                ESP_LOGI(TAG,"normal temperature is on");
-            }
-            if (newInfluence != elpriceInfluence)
-            {
-                elpriceInfluence = newInfluence;
-                ESP_LOGI(TAG,"changing target to %f", setup.temperature + elpriceInfluence);
-                cooler_setup(setup.temperature + elpriceInfluence, setup.hysteresis, setup.mintimeon);
-            }
+            checkPriceInfluence(root);
         }
     }
     else if (!strcmp(id,"awhightemp"))
@@ -680,7 +708,25 @@ void app_main(void)
         factoryreset_init();
         wifi_connect(comminfo->ssid, comminfo->password);
         evt_queue = xQueueCreate(10, sizeof(struct measurement));
-        temperatures_init(TEMP_BUS, chipid);
+        int sensorcnt = temperatures_init(TEMP_BUS, chipid);
+        if (sensorcnt)
+        {
+            char *sensorname;
+            char *friendlyname;
+            for (int i = 0; i < sensorcnt; i++)
+            {
+                sensorname   = temperature_getsensor(i);
+                friendlyname = flash_read_str(sensorname, sensorname, 20);
+                if (strcmp(friendlyname, sensorname))
+                {
+                    if (!temperature_set_friendlyname(sensorname, friendlyname))
+                    {
+                        ESP_LOGD(TAG, "Set friedlyname for %s failed", sensorname);
+                    }
+                    free(friendlyname); // flash_read_str does dynamic allocation
+                }
+            }
+        }
         cooler_init(comminfo->mqtt_prefix, chipid, COOLER_BUS);
 
         setup.temperature  = flash_read_float("temperature", setup.temperature);

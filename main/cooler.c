@@ -23,8 +23,9 @@ static char *coolerprefix;
 static uint8_t *chipid;
 static bool currentstate;
 static char coolerTopic[64];
-static int mintime = 120;
+static int minTime = 120;
 static time_t started;
+static float prevTemp = 0;
 
 static const char *TAG = "COOLER";
 
@@ -45,25 +46,28 @@ void cooler_setup(float start, float hyst, int mintime)
 {
     startTemp = start;
     hysteresis = hyst;
+    minTime = mintime;
+    cooler_check(prevTemp);
 }
 
 
 void cooler_check(float temperature)
 {
-    bool state = false;
+    static bool state = false;
     time_t now;
 
     time(&now);
+    prevTemp = temperature;
     if (temperature > startTemp && state == false)
     {
         ESP_LOGI(TAG,"temperature bigger than %f -> state=true", startTemp);
         started = now;
         state = true;
     }
-    else if (temperature < (startTemp - hysteresis) && state == true)
+    else if ((temperature < (startTemp - hysteresis)) && state == true)
     {
         int runtime = now - started;
-        if (runtime > mintime)
+        if (runtime > minTime)
         {
             ESP_LOGI(TAG,"temperature is smaller than %f -> state=false", startTemp - hysteresis);
             state = false;
@@ -75,7 +79,9 @@ void cooler_check(float temperature)
         }
     }
     else
+    {
         return;
+    }
 
     if (state != currentstate)
     {

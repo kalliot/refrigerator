@@ -1,0 +1,2 @@
+0.0.0.4 - Friendlyname for each ds18b20 sensor. Fixed a bug in cooler
+algorithm.
