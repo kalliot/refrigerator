@@ -121,7 +121,7 @@ static uint16_t maxQElements = 0;
 static int retry_num = 0;
 static char *program_version = "";
 static float elpriceInfluence = 0.0;
-
+static const char *appname = "refrigerator";
 
 static void sendStatistics(esp_mqtt_client_handle_t client, uint8_t *chipid, time_t now);
 static void sendSetup(esp_mqtt_client_handle_t client, uint8_t *chipid);
@@ -532,14 +532,13 @@ static void sendInfo(esp_mqtt_client_handle_t client, uint8_t *chipid)
 
     char infoTopic[42];
 
-    sprintf(infoTopic,"%s/refrigerator/%x%x%x/info",
-         comminfo->mqtt_prefix, chipid[3],chipid[4],chipid[5]);
-    sprintf(jsondata, "{\"dev\":\"%x%x%x\",\"id\":\"info\",\"memfree\":%d,\"idfversion\":\"%s\",\"progversion\":%s, \"tempsensors\":[%s]}",
+    sprintf(infoTopic,"%s/%s/%x%x%x/info",
+         comminfo->mqtt_prefix, appname, chipid[3],chipid[4],chipid[5]);
+    sprintf(jsondata, "{\"dev\":\"%x%x%x\",\"id\":\"info\",\"memfree\":%d,\"idfversion\":\"%s\",\"progversion\":%s}",
                 chipid[3],chipid[4],chipid[5],
                 esp_get_free_heap_size(),
                 esp_get_idf_version(),
-                program_version,
-                temperatures_info());
+                program_version);
     esp_mqtt_client_publish(client, infoTopic, jsondata , 0, 0, 1);
     sendcnt++;
     gpio_set_level(BLINK_GPIO, false);
@@ -548,28 +547,44 @@ static void sendInfo(esp_mqtt_client_handle_t client, uint8_t *chipid)
 /* ../setsetup -m '{"temperature": 8, "hysteresis": 2, "mintimeon": 120, "lopriceboost": 2, "hipricereduce", 1}'
 */
 
+
 static void sendSetup(esp_mqtt_client_handle_t client, uint8_t *chipid)
 {
     gpio_set_level(BLINK_GPIO, true);
 
-    char setupTopic[42];
+    char setupTopic[80];
 
-    sprintf(setupTopic,"%s/refrigerator/%x%x%x/setup",
-         comminfo->mqtt_prefix, chipid[3],chipid[4],chipid[5]);
+    sprintf(setupTopic,"%s/%s/%x%x%x/setup",
+         comminfo->mqtt_prefix, appname, chipid[3],chipid[4],chipid[5]);
     sprintf(jsondata, "{\"dev\":\"%x%x%x\",\"id\":\"setup\",\"temperature\":%.2f,\"hysteresis\":%.2f,\"mintimeon\":%d,\"lopriceboost\":%.2f,\"hipricereduce\":%.2f }",
                 chipid[3],chipid[4],chipid[5],
                 setup.temperature, setup.hysteresis, setup.mintimeon, setup.lopriceboost, setup.hipricereduce);
     esp_mqtt_client_publish(client, setupTopic, jsondata , 0, 0, 1);
     vTaskDelay(10 / portTICK_PERIOD_MS);
+    sendcnt++;
 
-    sprintf(setupTopic,"%s/refrigerator/%x%x%x/sensorsetup",
-         comminfo->mqtt_prefix, chipid[3],chipid[4],chipid[5]);
+    sprintf(setupTopic,"%s/%s/%x%x%x/sensorsetup",
+         comminfo->mqtt_prefix, appname, chipid[3],chipid[4],chipid[5]);
     sprintf(jsondata, "{\"dev\":\"%x%x%x\",\"id\":\"sensorsetup\",\"fridgesensor\":\"%s\"}",
                 chipid[3],chipid[4],chipid[5],
                 setup.fridgesensor);
-
-    esp_mqtt_client_publish(client, setupTopic, jsondata , 0, 0, 1);
     sendcnt++;
+
+    for (int i = 0; ; i++)
+    {
+        char *sensoraddr = temperature_getsensor(i);
+
+        if (sensoraddr == NULL) break;
+        sprintf(setupTopic,"%s/%s/%x%x%x/sensorfriendlyname/%s",
+        comminfo->mqtt_prefix, appname, chipid[3],chipid[4],chipid[5], sensoraddr);
+
+        sprintf(jsondata, "{\"dev\":\"%x%x%x\",\"id\":\"sensorfriendlyname\",\"sensor\":\"%s\",\"name\":\"%s\"}",
+                    chipid[3],chipid[4],chipid[5],
+                    sensoraddr, temperature_get_friendlyname(i));
+
+        esp_mqtt_client_publish(client, setupTopic, jsondata , 0, 0, 1);
+        sendcnt++;
+    }
     gpio_set_level(BLINK_GPIO, false);
 }
 
@@ -708,7 +723,7 @@ void app_main(void)
         factoryreset_init();
         wifi_connect(comminfo->ssid, comminfo->password);
         evt_queue = xQueueCreate(10, sizeof(struct measurement));
-        int sensorcnt = temperatures_init(TEMP_BUS, chipid);
+        int sensorcnt = temperature_init(TEMP_BUS, appname, chipid);
         if (sensorcnt)
         {
             char *sensorname;
@@ -741,19 +756,19 @@ void app_main(void)
         sntp_start();
         ESP_LOGI(TAG, "[APP] All init done, app_main, last line.");
 
-        sprintf(statisticsTopic,"%s/refrigerator/%x%x%x/statistics",
-            comminfo->mqtt_prefix, chipid[3],chipid[4],chipid[5]);
+        sprintf(statisticsTopic,"%s/%s/%x%x%x/statistics",
+            comminfo->mqtt_prefix, appname, chipid[3],chipid[4],chipid[5]);
         ESP_LOGI(TAG,"statisticsTopic=[%s]", statisticsTopic);
 
-        sprintf(otaUpdateTopic,"%s/refrigerator/%x%x%x/otaupdate",
-            comminfo->mqtt_prefix, chipid[3],chipid[4],chipid[5]);
+        sprintf(otaUpdateTopic,"%s/%s/%x%x%x/otaupdate",
+            comminfo->mqtt_prefix, appname, chipid[3],chipid[4],chipid[5]);
 
-        sprintf(readTopic,"%s/refrigerator/%x%x%x/setsetup",
-            comminfo->mqtt_prefix, chipid[3],chipid[4],chipid[5]);
+        sprintf(readTopic,"%s/%s/%x%x%x/setsetup",
+            comminfo->mqtt_prefix, appname, chipid[3],chipid[4],chipid[5]);
 
         sprintf(elpriceTopic,"%s/elprice/#", comminfo->mqtt_prefix);
 
-        program_version = ota_init(comminfo->mqtt_prefix, "refrigerator", chipid);
+        program_version = ota_init(comminfo->mqtt_prefix, appname, chipid);
         // it is very propable, we will not get correct timestamp here.
         // It takes some time to get correct timestamp from ntp.
         time(&started);

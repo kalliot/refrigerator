@@ -18,7 +18,6 @@
 #include "ds18b20.h"
 #include "mqtt_client.h"
 
-// one gpio can handle max 8 onewire sensors.
 #define MAX_SENSORS 3   
 #define SENSOR_NAMELEN 17
 #define FRIENDLY_NAMELEN 20
@@ -26,12 +25,11 @@
 
 static int tempSensorCnt;
 static uint8_t *chipid;
+static const char *myName;
 static DeviceAddress tempSensors[MAX_SENSORS];
-static char temperatureTopic[64];
-static char *temperatureInfo;
-static char *noInfo = "\0";
+static char temperatureTopic[80];
 
-static const char *TAG = "TEMPERATURES";
+static const char *TAG = "TEMPERATURE";
 
 static struct oneWireSensor {
     float prev;
@@ -86,32 +84,14 @@ static int temp_getaddresses(DeviceAddress *tempSensorAddresses) {
     return numberFound;
 }
 
-char *temperatures_info()
-{
-    if (!tempSensorCnt) return noInfo;
-    if (temperatureInfo == NULL)
-    {
-        temperatureInfo = (char *) malloc((SENSOR_NAMELEN + 3) * tempSensorCnt);
-        if (temperatureInfo)
-            temperatureInfo[0] = 0;
-        else
-            return noInfo;
-        for (int i = 0; i < tempSensorCnt; i++)
-        {
-            strcat(temperatureInfo,"\"");
-            strcat(temperatureInfo,sensors[i].sensorname);
-            strcat(temperatureInfo,"\"");
-            strcat(temperatureInfo,",");
-        }
-        temperatureInfo[strlen(temperatureInfo)-1] = 0;
-    }
-    return temperatureInfo;
-}
 
 char *temperature_getsensor(int index)
 {
+    if (index >= tempSensorCnt)
+        return NULL;
     return sensors[index].sensorname;
 }
+
 
 bool temperature_send(char *prefix, struct measurement *data, esp_mqtt_client_handle_t client)
 {
@@ -121,7 +101,7 @@ bool temperature_send(char *prefix, struct measurement *data, esp_mqtt_client_ha
     gpio_set_level(BLINK_GPIO, true);
 
     static char *datafmt = "{\"dev\":\"%x%x%x\",\"sensor\":\"%s\",\"friendlyname\":\"%s\",\"id\":\"temperature\",\"value\":%.02f,\"ts\":%jd,\"unit\":\"C\"}";
-    sprintf(temperatureTopic,"%s/refrigerator/%x%x%x/parameters/temperature/%s", prefix, chipid[3], chipid[4], chipid[5], sensors[data->gpio].sensorname);
+    sprintf(temperatureTopic,"%s/%s/%x%x%x/parameters/temperature/%s", prefix, myName, chipid[3], chipid[4], chipid[5], sensors[data->gpio].sensorname);
 
     sprintf(jsondata, datafmt,
                 chipid[3],chipid[4],chipid[5],
@@ -171,6 +151,12 @@ static void sendMeasurement(int index, float value)
     xQueueSend(evt_queue, &meas, 0);
 }
 
+char *temperature_get_friendlyname(int index)
+{
+    if (index >= tempSensorCnt)
+        return NULL;
+    return sensors[index].friendlyName;
+}
 
 bool temperature_set_friendlyname(char *sensorName, char *friendlyName)
 {
@@ -242,11 +228,13 @@ static void temp_reader(void* arg)
 }
 
 
-int temperatures_init(int gpio, uint8_t *chip)
+int temperature_init(int gpio, const char *name, uint8_t *chip)
 {
     char buff[3];
 
     chipid = chip;
+    myName = name;
+    ESP_LOGI(TAG,"my name is %s", myName);
     ds18b20_init(gpio);
     tempSensorCnt = temp_getaddresses(tempSensors);
     if (!tempSensorCnt) return 0;
