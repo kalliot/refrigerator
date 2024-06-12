@@ -281,6 +281,7 @@ static void sensorFriendlyName(cJSON *root)
     {
         ESP_LOGD(TAG, "writing sensor %s, friendlyname %s to flash",sensorname, friendlyname);
         flash_write_str(sensorname,friendlyname);
+        flash_commitchanges();
     }
 }
 
@@ -443,6 +444,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         sendInfo(client, (uint8_t *) handler_args);
         sendSetup(client, (uint8_t *) handler_args);
         temperature_sendall();
+        cooler_send_currentstate();
         break;
 
     case MQTT_EVENT_DISCONNECTED:
@@ -483,12 +485,30 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     }
 }
 
+/*  sntp_callback()
+**  My influx saver does not want to save records which have bad time.
+**  So, it's better to send them again, when correct time has been set.
+*/
+static void sntp_callback(struct timeval *tv)
+{
+    (void) tv;
+    static bool firstSyncDone = false;
+
+    if (!firstSyncDone)
+    {
+        temperature_sendall();
+        cooler_send_currentstate();
+        firstSyncDone = true;
+    }
+}
+
 
 static void sntp_start()
 {
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_init();
+    sntp_set_time_sync_notification_cb(sntp_callback);
 }
 
 
@@ -503,7 +523,6 @@ int getWifiStrength(void)
 
 
 //{"dev":"277998","id":"statistics","connectcnt":6,"disconnectcnt":399,"sendcnt":20186,"sensorerrors":81,"ts":1679761328}
-
 static void sendStatistics(esp_mqtt_client_handle_t client, uint8_t *chipid, time_t now)
 {
     if (now < MIN_EPOCH || started < MIN_EPOCH) return;
@@ -578,9 +597,11 @@ static void sendSetup(esp_mqtt_client_handle_t client, uint8_t *chipid)
         sprintf(setupTopic,"%s/%s/%x%x%x/sensorfriendlyname/%s",
         comminfo->mqtt_prefix, appname, chipid[3],chipid[4],chipid[5], sensoraddr);
 
+        char *friendlyname = temperature_get_friendlyname(i);
+        if (friendlyname == NULL) friendlyname = "null";
         sprintf(jsondata, "{\"dev\":\"%x%x%x\",\"id\":\"sensorfriendlyname\",\"sensor\":\"%s\",\"name\":\"%s\"}",
                     chipid[3],chipid[4],chipid[5],
-                    sensoraddr, temperature_get_friendlyname(i));
+                    sensoraddr, friendlyname);
 
         esp_mqtt_client_publish(client, setupTopic, jsondata , 0, 0, 1);
         sendcnt++;
@@ -662,6 +683,27 @@ void wifi_connect(char *ssid, char *password)
     esp_wifi_connect();
 }
 
+static void get_sensor_friendlynames(void)
+{
+    char *sensorname;
+    char *friendlyname;
+
+    for (int i = 0; i < 10; i++)
+    {
+        sensorname   = temperature_getsensor(i);
+        if (sensorname == NULL)
+            break;
+        friendlyname = flash_read_str(sensorname, sensorname, 20);
+        if (strcmp(friendlyname, sensorname))
+        {
+            if (!temperature_set_friendlyname(sensorname, friendlyname))
+            {
+                ESP_LOGD(TAG, "Set friedlyname for %s failed", sensorname);
+            }
+            free(friendlyname);
+        }
+    }
+}
 
 struct netinfo *get_networkinfo()
 {
@@ -721,27 +763,16 @@ void app_main(void)
     {
         gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
         factoryreset_init();
-        wifi_connect(comminfo->ssid, comminfo->password);
-        evt_queue = xQueueCreate(10, sizeof(struct measurement));
         int sensorcnt = temperature_init(TEMP_BUS, appname, chipid);
+        ESP_LOGI(TAG, "%d temperature sensors found", sensorcnt);
         if (sensorcnt)
         {
-            char *sensorname;
-            char *friendlyname;
-            for (int i = 0; i < sensorcnt; i++)
-            {
-                sensorname   = temperature_getsensor(i);
-                friendlyname = flash_read_str(sensorname, sensorname, 20);
-                if (strcmp(friendlyname, sensorname))
-                {
-                    if (!temperature_set_friendlyname(sensorname, friendlyname))
-                    {
-                        ESP_LOGD(TAG, "Set friedlyname for %s failed", sensorname);
-                    }
-                    free(friendlyname); // flash_read_str does dynamic allocation
-                }
-            }
+            get_sensor_friendlynames();
         }
+        ESP_LOGI(TAG,"All %d friendlynames queried", sensorcnt);
+        wifi_connect(comminfo->ssid, comminfo->password);
+        evt_queue = xQueueCreate(10, sizeof(struct measurement));
+
         cooler_init(comminfo->mqtt_prefix, chipid, COOLER_BUS);
 
         setup.temperature  = flash_read_float("temperature", setup.temperature);
@@ -800,11 +831,17 @@ void app_main(void)
                 }
                 switch (meas.id) {
                     case TEMPERATURE:
-                        if (!strcmp(setup.fridgesensor,temperature_getsensor(meas.gpio)))
+                    {
+                        char *sensorid = temperature_getsensor(meas.gpio);
+                        if (sensorid != NULL)
                         {
-                            cooler_check(meas.data.temperature);
+                            if (!strcmp(setup.fridgesensor,sensorid))
+                            {
+                                cooler_check(meas.data.temperature);
+                            }
+                            if (isConnected) temperature_send(comminfo->mqtt_prefix, &meas, client);
                         }
-                        if (isConnected) temperature_send(comminfo->mqtt_prefix, &meas, client);
+                    }
                     break;
 
                     case STATE:

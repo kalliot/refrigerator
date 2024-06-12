@@ -25,6 +25,7 @@ static bool currentstate;
 static char coolerTopic[64];
 static int minTime = 120;
 static time_t started;
+static time_t prevStateTs;
 static float prevTemp = 0;
 
 static const char *TAG = "COOLER";
@@ -34,6 +35,7 @@ void cooler_init(char *prefix, uint8_t *chip, int gpio)
     coolerprefix = prefix;
     coolergpio = gpio;
     chipid = chip;
+    time(&prevStateTs);
     gpio_reset_pin(coolergpio);
     gpio_set_direction(coolergpio, GPIO_MODE_OUTPUT);
     gpio_set_level(coolergpio, false);    
@@ -85,32 +87,51 @@ void cooler_check(float temperature)
 
     if (state != currentstate)
     {
-        gpio_set_level(coolergpio, state);    
-        struct measurement meas;
-        meas.gpio = coolergpio;
-        meas.id = STATE;
-        meas.data.state = state;
-        xQueueSendFromISR(evt_queue, &meas, NULL);
         currentstate = state;
+        cooler_send_currentstate();
+        gpio_set_level(coolergpio, state);
     }
 }
 
+void cooler_send_currentstate(void)0
+{
+    struct measurement meas;
+    time_t now;
+
+    time(&now);
+    if (now < MIN_EPOCH) return;
+
+    meas.gpio = coolergpio;
+    meas.id = STATE;
+    meas.data.state = currentstate;
+    xQueueSendFromISR(evt_queue, &meas, NULL);
+}
 
 bool cooler_publish(struct measurement *data, esp_mqtt_client_handle_t client)
 {
     time_t now;
-    
+    int duration;
+
     time(&now);
     gpio_set_level(BLINK_GPIO, true);
 
-    static char *datafmt = "{\"dev\":\"%x%x%x\",\"id\":\"cooler\",\"value\":%d,\"ts\":%jd,\"unit\":\"state\"}";
+    if (prevStateTs > MIN_EPOCH) {
+        duration = now - prevStateTs;
+    }
+    else {
+        duration = 0;
+    }
+
+    static char *datafmt = "{\"dev\":\"%x%x%x\",\"id\":\"cooler\",\"value\":%d,\"ts\":%jd,\"duration\":%d,\"unit\":\"state\"}";
 
     sprintf(jsondata, datafmt,
                 chipid[3],chipid[4],chipid[5],
                 data->data.state,
-                now);
+                now,
+                duration);
     esp_mqtt_client_publish(client, coolerTopic, jsondata , 0, 0, 1);
     sendcnt++;
+    prevStateTs = now;
     gpio_set_level(BLINK_GPIO, false);
     return true;
 }

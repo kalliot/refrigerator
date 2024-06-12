@@ -19,7 +19,7 @@
 #include "mqtt_client.h"
 
 #define MAX_SENSORS 3   
-#define SENSOR_NAMELEN 17
+#define SENSOR_NAMELEN 18
 #define FRIENDLY_NAMELEN 20
 #define NO_CHANGE_INTERVAL 900
 
@@ -87,9 +87,10 @@ static int temp_getaddresses(DeviceAddress *tempSensorAddresses) {
 
 char *temperature_getsensor(int index)
 {
-    if (index >= tempSensorCnt)
+    if (index < tempSensorCnt)
+        return sensors[index].sensorname;
+    else
         return NULL;
-    return sensors[index].sensorname;
 }
 
 
@@ -129,7 +130,7 @@ static void getFirstTemperatures()
             vTaskDelay(1000 / portTICK_PERIOD_MS);
             temperature = ds18b20_getTempC((DeviceAddress *) sensors[i].addr) + 1.0;
             if (temperature < -30.0 || temperature > 85.0) {
-                ESP_LOGI(TAG,"%s failed with initial value %f, reading again", sensors[i].sensorname, temperature);
+                ESP_LOGI(TAG,"%d failed with initial value %f, reading again", i, temperature);
             }
             else {
                 sensors[i].prev = temperature;
@@ -145,6 +146,11 @@ static void getFirstTemperatures()
 static void sendMeasurement(int index, float value)
 {
     struct measurement meas;
+    time_t now;
+
+    time(&now);
+    if (now < MIN_EPOCH) return;
+
     meas.id = TEMPERATURE;
     meas.gpio = index;
     meas.data.temperature = value;
@@ -165,6 +171,7 @@ bool temperature_set_friendlyname(char *sensorName, char *friendlyName)
         if (!strcmp(sensorName,sensors[i].sensorname))
         {
             strcpy(sensors[i].friendlyName, friendlyName);
+            ESP_LOGI(TAG,"set friendlyname, %s = %s", sensorName, friendlyName);
             return true;
         }
     }
@@ -243,7 +250,7 @@ int temperature_init(int gpio, const char *name, uint8_t *chip)
     sensors = malloc(sizeof(struct oneWireSensor) * tempSensorCnt);
     if (sensors == NULL) {
         ESP_LOGD(TAG,"malloc failed when allocating sensors");
-        return false;
+        return 0;
     }
     ESP_LOGI(TAG,"found %d temperature sensors", tempSensorCnt);
     for (int i = 0; i < tempSensorCnt; i++) {
@@ -251,7 +258,8 @@ int temperature_init(int gpio, const char *name, uint8_t *chip)
         sensors[i].prev = 0.0;
         sensors[i].prevsend = 0;
         sensors[i].lastValid = 0;
-        sensors[i].sensorname[0]= '\0';
+        memset(sensors[i].sensorname,0,SENSOR_NAMELEN);
+        memset(sensors[i].friendlyName,0,FRIENDLY_NAMELEN);
         for (int j = 0; j < 8; j++) {
             sprintf(buff,"%x",tempSensors[i][j]);
             strcat(sensors[i].sensorname, buff);
@@ -264,5 +272,6 @@ int temperature_init(int gpio, const char *name, uint8_t *chip)
     {
         xTaskCreate(temp_reader, "temperature reader", 2048, NULL, 10, NULL);
     }
+    ESP_LOGI(TAG,"RETURNING %d cnt of sensors", tempSensorCnt);
     return tempSensorCnt;
 }

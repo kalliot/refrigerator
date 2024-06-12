@@ -1,2 +1,4 @@
-0.0.0.4 - Friendlyname for each ds18b20 sensor. Fixed a bug in cooler
-algorithm.
+0.0.0.4 - Friendlyname for each ds18b20 sensor. Fixed a bug in cooler algorithm.
+0.0.0.5 - After sensor frendlyname set, committing flash.
+0.0.0.6 - Dont send measurements, if network time is unknown.
+	This is quite stable version.
