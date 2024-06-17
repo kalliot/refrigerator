@@ -146,10 +146,6 @@ static void getFirstTemperatures()
 static void sendMeasurement(int index, float value)
 {
     struct measurement meas;
-    time_t now;
-
-    time(&now);
-    if (now < MIN_EPOCH) return;
 
     meas.id = TEMPERATURE;
     meas.gpio = index;
@@ -191,11 +187,6 @@ static void temp_reader(void* arg)
 {
     float temperature;
     time_t now;
-
-    for(time_t now = 0; now < MIN_EPOCH; time(&now))
-    {
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
 
     for (;;)
     {
@@ -260,7 +251,7 @@ int temperature_init(int gpio, const char *name, uint8_t *chip)
         sensors[i].lastValid = 0;
         memset(sensors[i].sensorname,0,SENSOR_NAMELEN);
         memset(sensors[i].friendlyName,0,FRIENDLY_NAMELEN);
-        for (int j = 0; j < 8; j++) {
+        for (int j = 3; j < 8; j++) { // shorten the name, big name does not fit as a key to nvs flash storage
             sprintf(buff,"%x",tempSensors[i][j]);
             strcat(sensors[i].sensorname, buff);
             strcat(sensors[i].friendlyName, buff);

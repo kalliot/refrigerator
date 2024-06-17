@@ -10,6 +10,7 @@
 #include "cJSON.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
+#include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_mac.h"
@@ -58,6 +59,13 @@
 #endif
 
 #define WIFI_RECONNECT_RETRYCNT 50
+
+#define HEALTHYFLAGS_WIFI 1
+#define HEALTHYFLAGS_MQTT 2
+#define HEALTHYFLAGS_TEMP 4
+#define HEALTHYFLAGS_NTP  8
+
+
 
 struct netinfo {
     char *ssid;
@@ -108,6 +116,7 @@ uint16_t sendcnt = 0;
 
 static const char *TAG = "REFRIGERATOR";
 static bool isConnected = false;
+static uint8_t healthyflags = 0;
 static uint16_t connectcnt = 0;
 static uint16_t disconnectcnt = 0;
 uint16_t sensorerrors = 0;
@@ -121,7 +130,7 @@ static uint16_t maxQElements = 0;
 static int retry_num = 0;
 static char *program_version = "";
 static float elpriceInfluence = 0.0;
-static const char *appname = "refrigerator";
+static char appname[20];
 
 static void sendStatistics(esp_mqtt_client_handle_t client, uint8_t *chipid, time_t now);
 static void sendSetup(esp_mqtt_client_handle_t client, uint8_t *chipid);
@@ -445,6 +454,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         sendSetup(client, (uint8_t *) handler_args);
         temperature_sendall();
         cooler_send_currentstate();
+        healthyflags |= HEALTHYFLAGS_MQTT;
         break;
 
     case MQTT_EVENT_DISCONNECTED:
@@ -496,9 +506,11 @@ static void sntp_callback(struct timeval *tv)
 
     if (!firstSyncDone)
     {
+        time(&started);
         temperature_sendall();
         cooler_send_currentstate();
         firstSyncDone = true;
+        healthyflags |= HEALTHYFLAGS_NTP;
     }
 }
 
@@ -655,7 +667,7 @@ static void wifi_event_handler(void *event_handler_arg, esp_event_base_t event_b
         ESP_LOGI(TAG,"Wifi got IP\n");
         gpio_set_level(WLANSTATUS_GPIO, true);
         retry_num = 0;
-        ota_cancel_rollback();
+        healthyflags |= HEALTHYFLAGS_WIFI;
     }
 }
 
@@ -721,11 +733,29 @@ struct netinfo *get_networkinfo()
     return &ni;
 }
 
+void readSetup(void)
+{
+    setup.temperature  = flash_read_float("temperature", setup.temperature);
+    setup.hysteresis   = flash_read_float("hysteresis", setup.hysteresis);
+    setup.mintimeon    = flash_read("mintimeon", setup.mintimeon);
+    setup.lopriceboost = flash_read_float("lopriceboost", setup.lopriceboost);
+    setup.hipricereduce= flash_read_float("hipricereduce", setup.hipricereduce);
+    strcpy(setup.fridgesensor, flash_read_str("fridgesensor", setup.fridgesensor,20));
+    cooler_setup(setup.temperature, setup.hysteresis, setup.mintimeon);
+}
+
+
+static void get_appname(void)
+{
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    strncpy(appname,app_desc->project_name,20);
+}
 
 void app_main(void)
 {
     uint8_t chipid[8];
     time_t now, prevStatsTs;
+
     esp_efuse_mac_get_default(chipid);
 
     ESP_LOGI(TAG, "[APP] Startup..");
@@ -752,6 +782,7 @@ void app_main(void)
     gpio_set_direction(SETUP_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_direction(MQTTSTATUS_GPIO, GPIO_MODE_OUTPUT);
 
+    get_appname();
     flash_open("storage");
     comminfo = get_networkinfo();
     if (comminfo == NULL)
@@ -761,28 +792,16 @@ void app_main(void)
     }
     else
     {
+        evt_queue = xQueueCreate(10, sizeof(struct measurement));
         gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
         factoryreset_init();
-        int sensorcnt = temperature_init(TEMP_BUS, appname, chipid);
-        ESP_LOGI(TAG, "%d temperature sensors found", sensorcnt);
-        if (sensorcnt)
+        if (temperature_init(TEMP_BUS, appname, chipid) > 0)
         {
             get_sensor_friendlynames();
         }
-        ESP_LOGI(TAG,"All %d friendlynames queried", sensorcnt);
         wifi_connect(comminfo->ssid, comminfo->password);
-        evt_queue = xQueueCreate(10, sizeof(struct measurement));
-
         cooler_init(comminfo->mqtt_prefix, chipid, COOLER_BUS);
-
-        setup.temperature  = flash_read_float("temperature", setup.temperature);
-        setup.hysteresis   = flash_read_float("hysteresis", setup.hysteresis);
-        setup.mintimeon    = flash_read("mintimeon", setup.mintimeon);
-        setup.lopriceboost = flash_read_float("lopriceboost", setup.lopriceboost);
-        setup.hipricereduce= flash_read_float("hipricereduce", setup.hipricereduce);
-        strcpy(setup.fridgesensor, flash_read_str("fridgesensor", setup.fridgesensor,20));
-        cooler_setup(setup.temperature, setup.hysteresis, setup.mintimeon);
-
+        readSetup();
         esp_mqtt_client_handle_t client = mqtt_app_start(chipid);
         sntp_start();
         ESP_LOGI(TAG, "[APP] All init done, app_main, last line.");
@@ -802,17 +821,18 @@ void app_main(void)
         program_version = ota_init(comminfo->mqtt_prefix, appname, chipid);
         // it is very propable, we will not get correct timestamp here.
         // It takes some time to get correct timestamp from ntp.
-        time(&started);
         prevStatsTs = now = started;
-
 
         ESP_LOGI(TAG, "gpios: mqtt=%d wlan=%d",MQTTSTATUS_GPIO,WLANSTATUS_GPIO);
         while (1)
         {
             struct measurement meas;
-            // send statistics after 4 hours, if nothing happens.
-            // this is typical if we have only slow changing state sensor
-
+            // several things should be running before we acknowledge the ota image is well behaving.
+            if ((now - started > 20) &&
+                 (healthyflags == (HEALTHYFLAGS_WIFI | HEALTHYFLAGS_MQTT | HEALTHYFLAGS_NTP | HEALTHYFLAGS_TEMP)))
+            {
+                ota_cancel_rollback();
+            }
             if(xQueueReceive(evt_queue, &meas, STATISTICS_INTERVAL * 1000 / portTICK_PERIOD_MS)) {
                 time(&now);
                 uint16_t qcnt = uxQueueMessagesWaiting(evt_queue);
@@ -841,6 +861,7 @@ void app_main(void)
                             }
                             if (isConnected) temperature_send(comminfo->mqtt_prefix, &meas, client);
                         }
+                        healthyflags |= HEALTHYFLAGS_TEMP;
                     }
                     break;
 

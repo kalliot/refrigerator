@@ -93,13 +93,9 @@ void cooler_check(float temperature)
     }
 }
 
-void cooler_send_currentstate(void)0
+void cooler_send_currentstate(void)
 {
     struct measurement meas;
-    time_t now;
-
-    time(&now);
-    if (now < MIN_EPOCH) return;
 
     meas.gpio = coolergpio;
     meas.id = STATE;

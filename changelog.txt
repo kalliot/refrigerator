@@ -2,3 +2,8 @@
 0.0.0.5 - After sensor frendlyname set, committing flash.
 0.0.0.6 - Dont send measurements, if network time is unknown.
 	This is quite stable version.
+0.0.0.9 - Check very carefully that the ota package is behaving well,
+        before acknowledging it. The name <refrigerator> in mosquitto topics
+	is taken by an api call. So it is not needed to be hardcoded in source
+	anymore.
+
