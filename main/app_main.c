@@ -333,10 +333,12 @@ static void readSetupJson(cJSON *root)
     flash_commitchanges();
 }
 
-void checkPriceInfluence(cJSON *root)
+bool checkPriceInfluence(cJSON *root)
 {
     float newInfluence = 0.0;
     char *daystr = getJsonStr(root,"day");
+    bool ret = false;
+
     if (isInArray(daystr, hitemp, hitempcnt))
     {
         ESP_LOGI(TAG,"Lo price, COOLER TEMP IS ON!");
@@ -356,14 +358,44 @@ void checkPriceInfluence(cJSON *root)
         elpriceInfluence = newInfluence;
         ESP_LOGI(TAG,"changing target to %f", setup.temperature + elpriceInfluence);
         cooler_setup(setup.temperature + elpriceInfluence, setup.hysteresis, setup.mintimeon);
+        ret = true;
     }
+    return ret;
 }
 
-static bool handleJson(esp_mqtt_event_handle_t event)
+
+bool sendTargetInfo(esp_mqtt_client_handle_t client, uint8_t *chipid, float target, time_t now)
+{
+    gpio_set_level(BLINK_GPIO, true);
+    char targetTopic[60];
+    int retain=1;
+    static char *datafmt = "{\"dev\":\"%x%x%x\",\"id\":\"targettemp\",\"value\":%.02f,\"ts\":%jd,\"unit\":\"C\"}";
+
+    sprintf(targetTopic,"%s/%s/%x%x%x/parameters/targettemp", comminfo->mqtt_prefix, appname, chipid[3], chipid[4], chipid[5]);
+
+    if (now < MIN_EPOCH)
+    {
+        retain = 0;
+        now = 0;
+    }
+    sprintf(jsondata, datafmt,
+                chipid[3],chipid[4],chipid[5],
+                target,
+                now);
+    esp_mqtt_client_publish(client, targetTopic, jsondata , 0, 0, retain);
+    sendcnt++;
+    gpio_set_level(BLINK_GPIO, false);
+    return true;
+}
+
+static bool handleJson(esp_mqtt_event_handle_t event, uint8_t *chipid)
 {
     cJSON *root = cJSON_Parse(event->data);
     bool ret = false;
     char id[20];
+    time_t now;
+
+    time(&now);
 
     if (root != NULL)
     {
@@ -398,7 +430,10 @@ static bool handleJson(esp_mqtt_event_handle_t event)
         char *topicpostfix = &event->topic[event->topic_len - 7];
         if (!memcmp(topicpostfix,"current",7))
         {
-            checkPriceInfluence(root);
+            if (checkPriceInfluence(root))
+            {
+                sendTargetInfo(event->client, chipid, setup.temperature + elpriceInfluence, now);
+            }
         }
     }
     else if (!strcmp(id,"awhightemp"))
@@ -476,7 +511,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
 
     case MQTT_EVENT_DATA:
-        if (handleJson(event)) sendSetup(client, (uint8_t *) handler_args);
+        if (handleJson(event,(uint8_t *) handler_args))
+        {
+            sendSetup(client, (uint8_t *) handler_args);
+        }
         break;
 
     case MQTT_EVENT_ERROR:
@@ -574,6 +612,7 @@ static void sendInfo(esp_mqtt_client_handle_t client, uint8_t *chipid)
     sendcnt++;
     gpio_set_level(BLINK_GPIO, false);
 }
+
 
 /* ../setsetup -m '{"temperature": 8, "hysteresis": 2, "mintimeon": 120, "lopriceboost": 2, "hipricereduce", 1}'
 */
