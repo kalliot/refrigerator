@@ -13,8 +13,10 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
-
+#include "homeapp.h"
+#include "debug.h"
 #include "cooler.h"
+
 
 static float startTemp;
 static int coolergpio;
@@ -30,7 +32,7 @@ static float prevTemp = 0;
 
 static const char *TAG = "COOLER";
 
-void cooler_init(char *prefix, uint8_t *chip, int gpio)
+void cooler_init(char *prefix, char *name, uint8_t *chip, int gpio)
 {
     coolerprefix = prefix;
     coolergpio = gpio;
@@ -39,7 +41,7 @@ void cooler_init(char *prefix, uint8_t *chip, int gpio)
     gpio_reset_pin(coolergpio);
     gpio_set_direction(coolergpio, GPIO_MODE_OUTPUT);
     gpio_set_level(coolergpio, false);    
-    sprintf(coolerTopic,"%s/refrigerator/%x%x%x/parameters/state/%d", prefix, chipid[3], chipid[4], chipid[5], coolergpio);
+    sprintf(coolerTopic,"%s/%s/%x%x%x/parameters/state/%d", prefix, name, chipid[3], chipid[4], chipid[5], coolergpio);
     return;
 }
 
@@ -63,6 +65,7 @@ void cooler_check(float temperature)
     if (temperature > startTemp && state == false)
     {
         ESP_LOGI(TAG,"temperature bigger than %f -> state=true", startTemp);
+        debug_printf("temperature bigger than %f -> state=true", startTemp);
         started = now;
         state = true;
     }
@@ -72,11 +75,13 @@ void cooler_check(float temperature)
         if (runtime > minTime)
         {
             ESP_LOGI(TAG,"temperature is smaller than %f -> state=false", startTemp - hysteresis);
+            debug_printf("temperature is smaller than %f -> state=false", startTemp - hysteresis);
             state = false;
         }
         else
         {
             ESP_LOGI(TAG,"runtime is only %d seconds, keeping compressor on", runtime);
+            debug_printf("runtime is only %d seconds, keeping compressor on", runtime);
             return;
         }
     }
@@ -106,16 +111,20 @@ void cooler_send_currentstate(void)
 bool cooler_publish(struct measurement *data, esp_mqtt_client_handle_t client)
 {
     time_t now;
-    int duration;
+    int duration = 0;
+    int retain = 1;
 
     time(&now);
     gpio_set_level(BLINK_GPIO, true);
 
-    if (prevStateTs > MIN_EPOCH) {
-        duration = now - prevStateTs;
+    if (now < MIN_EPOCH)
+    {
+        now = 0;
+        retain = 0;
     }
-    else {
-        duration = 0;
+    else
+    {
+        if (prevStateTs > MIN_EPOCH) duration = now - prevStateTs;
     }
 
     static char *datafmt = "{\"dev\":\"%x%x%x\",\"id\":\"cooler\",\"value\":%d,\"ts\":%jd,\"duration\":%d,\"unit\":\"state\"}";
@@ -125,8 +134,7 @@ bool cooler_publish(struct measurement *data, esp_mqtt_client_handle_t client)
                 data->data.state,
                 now,
                 duration);
-    esp_mqtt_client_publish(client, coolerTopic, jsondata , 0, 0, 1);
-    sendcnt++;
+    esp_mqtt_client_publish(client, coolerTopic, jsondata , 0, 0, retain);
     prevStateTs = now;
     gpio_set_level(BLINK_GPIO, false);
     return true;

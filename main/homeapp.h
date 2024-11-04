@@ -3,6 +3,8 @@
 
 #include "freertos/queue.h"
 
+#define DEBUG_TO_MQTT 1
+
 enum meastype
 {
     COUNT,
@@ -23,8 +25,6 @@ struct measurement {
 
 extern QueueHandle_t evt_queue;
 extern char jsondata[256];
-extern uint16_t sendcnt;
-extern uint16_t sensorerrors;
 
 #define BLINK_GPIO         23
 #define SETUP_GPIO         CONFIG_SETUPLED_GPIO

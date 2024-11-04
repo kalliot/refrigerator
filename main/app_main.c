@@ -32,13 +32,15 @@
 #include "esp_log.h"
 #include "cooler.h"
 #include "homeapp.h"
-#include "temperatures.h"
+#include "temperature/temperatures.h"
 #include "flashmem.h"
 #include "ota/ota.h"
+#include "device/device.h"
 #include "mqtt_client.h"
 #include "apwebserver/server.h"
 #include "factoryreset.h"
-
+#include "statistics/statistics.h"
+#include "debug.h"
 
 #define TEMP_BUS 27
 #define COOLER_BUS 16
@@ -94,20 +96,9 @@ struct config setup =
     .hipricereduce  = 1
 };
 
-struct specialTemperature
-{
-    char timestr[11];
-    float price;
-};
 
 
 // globals
-
-struct specialTemperature *hitemp = NULL;
-struct specialTemperature *lotemp = NULL;
-int hitempcnt = 0;
-int lotempcnt = 0;
-
 
 struct netinfo *comminfo;
 QueueHandle_t evt_queue = NULL;
@@ -117,22 +108,17 @@ uint16_t sendcnt = 0;
 static const char *TAG = "REFRIGERATOR";
 static bool isConnected = false;
 static uint8_t healthyflags = 0;
-static uint16_t connectcnt = 0;
-static uint16_t disconnectcnt = 0;
 uint16_t sensorerrors = 0;
 
 static char statisticsTopic[64];
 static char readTopic[64];
 static char otaUpdateTopic[64];
 static char elpriceTopic[64];
-static time_t started;
-static uint16_t maxQElements = 0;
 static int retry_num = 0;
 static char *program_version = "";
 static float elpriceInfluence = 0.0;
 static char appname[20];
 
-static void sendStatistics(esp_mqtt_client_handle_t client, uint8_t *chipid, time_t now);
 static void sendSetup(esp_mqtt_client_handle_t client, uint8_t *chipid);
 static void sendInfo(esp_mqtt_client_handle_t client, uint8_t *chipid);
 
@@ -206,73 +192,6 @@ static void log_error_if_nonzero(const char *message, int error_code)
 }
 
 
-static struct specialTemperature *jsonToHiLoTable(cJSON *js, char *name, int *cnt, struct specialTemperature *tempArr)
-{
-    cJSON *item = cJSON_GetObjectItem(js, name);
-    int itemCnt=0;
-
-    if (item != NULL)
-    {
-        if (cJSON_IsArray(item))
-        {
-            itemCnt = cJSON_GetArraySize(item);
-
-            // table should be allocated or reallocated, if count of lines differ.
-            if (*cnt == 0 || itemCnt != *cnt) // we already had a table
-            {
-                *cnt = itemCnt;
-                if (tempArr != NULL)
-                {
-                    free(tempArr);   // array sizes are different, free old one and allocate a new one.
-                    tempArr = NULL;  // no array items in json.
-                }
-                if (itemCnt)
-                {
-                    tempArr = (struct specialTemperature *) malloc(itemCnt * sizeof(struct specialTemperature));
-                }
-            }
-            if (tempArr != NULL)
-            {
-                for (int i=0;i<itemCnt;i++)
-                {
-                    cJSON *elem = cJSON_GetArrayItem(item, i);
-                    if (elem != NULL)
-                    {
-                        cJSON *jstime = cJSON_GetObjectItem(elem, "time");
-                        if (jstime != NULL)
-                        {
-                            if (cJSON_IsString(jstime))
-                            {
-                                strcpy(tempArr[i].timestr,jstime->valuestring);
-                            }
-                        }
-
-                        cJSON *jsprice = cJSON_GetObjectItem(elem, "price");
-                        if (jsprice != NULL)
-                        {
-                            if (cJSON_IsNumber(jsprice))
-                            {
-                                tempArr[i].price = jsprice->valuedouble;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return tempArr;
-}
-
-static bool isInArray(char *str, struct specialTemperature *arr, int cnt)
-{
-    for (int i = 0; i < cnt; i++)
-    {
-        if (!strcmp(str,arr[i].timestr))
-            return true;
-    }
-    return false;
-}
-
 
 /* ../setsetup -m '{"dev":"fd9030","id":"setsensorfriendlyname", "sensor": "28c1cf574e13c97", "name":"inside"}'
    ../setsetup -m '{"dev":"fd9030","id":"setsensorfriendlyname", "sensor": "28524a256002a", "name": "outside"}'
@@ -333,18 +252,19 @@ static void readSetupJson(cJSON *root)
     flash_commitchanges();
 }
 
+
 bool checkPriceInfluence(cJSON *root)
 {
     float newInfluence = 0.0;
-    char *daystr = getJsonStr(root,"day");
+    char *pricestate = getJsonStr(root,"pricestate");
     bool ret = false;
 
-    if (isInArray(daystr, hitemp, hitempcnt))
+    if (!strcmp(pricestate,"low"))
     {
         ESP_LOGI(TAG,"Lo price, COOLER TEMP IS ON!");
         newInfluence = -1 * setup.lopriceboost; // boost means cooler than normal
     }
-    else if (isInArray(daystr, lotemp, lotempcnt))
+    else if (!strcmp(pricestate,"high"))
     {
         ESP_LOGI(TAG,"Hi price, WARMER TEMP IS ON!");
         newInfluence = setup.hipricereduce;
@@ -383,7 +303,7 @@ bool sendTargetInfo(esp_mqtt_client_handle_t client, uint8_t *chipid, float targ
                 target,
                 now);
     esp_mqtt_client_publish(client, targetTopic, jsondata , 0, 0, retain);
-    sendcnt++;
+    statistics_getptr()->sendcnt++;
     gpio_set_level(BLINK_GPIO, false);
     return true;
 }
@@ -430,21 +350,11 @@ static bool handleJson(esp_mqtt_event_handle_t event, uint8_t *chipid)
         char *topicpostfix = &event->topic[event->topic_len - 7];
         if (!memcmp(topicpostfix,"current",7))
         {
-            if (checkPriceInfluence(root))
-            {
-                sendTargetInfo(event->client, chipid, setup.temperature + elpriceInfluence, now);
-            }
+            
+            checkPriceInfluence(root);
+            sendTargetInfo(event->client, chipid, setup.temperature + elpriceInfluence, now);
         }
     }
-    else if (!strcmp(id,"awhightemp"))
-    {
-        hitemp = jsonToHiLoTable(root,"values", &hitempcnt, hitemp);
-    }
-    else if (!strcmp(id,"awlowtemp"))
-    {
-        lotemp = jsonToHiLoTable(root,"values", &lotempcnt, lotemp);
-    }
-
     cJSON_Delete(root);
     return ret;
 }
@@ -483,8 +393,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 
         gpio_set_level(MQTTSTATUS_GPIO, true);
+        device_sendstatus(client, comminfo->mqtt_prefix, appname, (uint8_t *) handler_args);
         isConnected = true;
-        connectcnt++;
+        statistics_getptr()->connectcnt++;
         sendInfo(client, (uint8_t *) handler_args);
         sendSetup(client, (uint8_t *) handler_args);
         temperature_sendall();
@@ -494,7 +405,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
-        disconnectcnt++;
+        statistics_getptr()->disconnectcnt++;
         isConnected = false;
         gpio_set_level(MQTTSTATUS_GPIO, false);
         break;
@@ -544,7 +455,6 @@ static void sntp_callback(struct timeval *tv)
 
     if (!firstSyncDone)
     {
-        time(&started);
         temperature_sendall();
         cooler_send_currentstate();
         firstSyncDone = true;
@@ -572,29 +482,6 @@ int getWifiStrength(void)
 }
 
 
-//{"dev":"277998","id":"statistics","connectcnt":6,"disconnectcnt":399,"sendcnt":20186,"sensorerrors":81,"ts":1679761328}
-static void sendStatistics(esp_mqtt_client_handle_t client, uint8_t *chipid, time_t now)
-{
-    if (now < MIN_EPOCH || started < MIN_EPOCH) return;
-    gpio_set_level(BLINK_GPIO, true);
-
-    static char *datafmt = "{\"dev\":\"%x%x%x\",\"id\":\"statistics\",\"connectcnt\":%d,\"disconnectcnt\":%d,\"sendcnt\":%d,\"sensorerrors\":%d, \"max_queued\":%d,\"ts\":%jd,\"started\":%jd,\"rssi\":%d}";
-    
-    sprintf(jsondata, datafmt, 
-                chipid[3],chipid[4],chipid[5],
-                connectcnt,
-                disconnectcnt,
-                sendcnt,
-                sensorerrors,
-                maxQElements,
-                now,
-                started,
-                getWifiStrength());
-    esp_mqtt_client_publish(client, statisticsTopic, jsondata , 0, 0, 1);
-    sendcnt++;
-    gpio_set_level(BLINK_GPIO, false);
-}
-
 static void sendInfo(esp_mqtt_client_handle_t client, uint8_t *chipid)
 {
     gpio_set_level(BLINK_GPIO, true);
@@ -609,7 +496,7 @@ static void sendInfo(esp_mqtt_client_handle_t client, uint8_t *chipid)
                 esp_get_idf_version(),
                 program_version);
     esp_mqtt_client_publish(client, infoTopic, jsondata , 0, 0, 1);
-    sendcnt++;
+    statistics_getptr()->sendcnt++;
     gpio_set_level(BLINK_GPIO, false);
 }
 
@@ -631,14 +518,14 @@ static void sendSetup(esp_mqtt_client_handle_t client, uint8_t *chipid)
                 setup.temperature, setup.hysteresis, setup.mintimeon, setup.lopriceboost, setup.hipricereduce);
     esp_mqtt_client_publish(client, setupTopic, jsondata , 0, 0, 1);
     vTaskDelay(10 / portTICK_PERIOD_MS);
-    sendcnt++;
+    statistics_getptr()->sendcnt++;
 
     sprintf(setupTopic,"%s/%s/%x%x%x/sensorsetup",
          comminfo->mqtt_prefix, appname, chipid[3],chipid[4],chipid[5]);
     sprintf(jsondata, "{\"dev\":\"%x%x%x\",\"id\":\"sensorsetup\",\"fridgesensor\":\"%s\"}",
                 chipid[3],chipid[4],chipid[5],
                 setup.fridgesensor);
-    sendcnt++;
+    statistics_getptr()->sendcnt++;
 
     for (int i = 0; ; i++)
     {
@@ -655,7 +542,7 @@ static void sendSetup(esp_mqtt_client_handle_t client, uint8_t *chipid)
                     sensoraddr, friendlyname);
 
         esp_mqtt_client_publish(client, setupTopic, jsondata , 0, 0, 1);
-        sendcnt++;
+        statistics_getptr()->sendcnt++;
     }
     gpio_set_level(BLINK_GPIO, false);
 }
@@ -664,6 +551,7 @@ static esp_mqtt_client_handle_t mqtt_app_start(uint8_t *chipid)
 {
     char client_id[128];
     char uri[64];
+    char deviceTopic[42];
     
     sprintf(client_id,"client_id=%s%x%x%x",
         comminfo->mqtt_prefix ,chipid[3],chipid[4],chipid[5]);
@@ -672,7 +560,12 @@ static esp_mqtt_client_handle_t mqtt_app_start(uint8_t *chipid)
     ESP_LOGI(TAG,"built client id=[%s]",client_id);
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = uri,
-        .credentials.client_id = client_id
+        .credentials.client_id = client_id,
+        .session.last_will.topic = device_topic(comminfo->mqtt_prefix, deviceTopic, chipid),
+        .session.last_will.msg = device_data(jsondata, chipid, appname, 0),
+        .session.last_will.msg_len = strlen(jsondata),
+        .session.last_will.qos = 0,
+        .session.last_will.retain = 1
     };
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
     /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler */
@@ -790,6 +683,7 @@ static void get_appname(void)
     strncpy(appname,app_desc->project_name,20);
 }
 
+
 void app_main(void)
 {
     uint8_t chipid[8];
@@ -834,15 +728,17 @@ void app_main(void)
         evt_queue = xQueueCreate(10, sizeof(struct measurement));
         gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
         factoryreset_init();
-        if (temperature_init(TEMP_BUS, appname, chipid) > 0)
+        if (temperature_init(TEMP_BUS, appname, chipid, 2) > 0)
         {
             get_sensor_friendlynames();
         }
         wifi_connect(comminfo->ssid, comminfo->password);
-        cooler_init(comminfo->mqtt_prefix, chipid, COOLER_BUS);
+        cooler_init(comminfo->mqtt_prefix, appname, chipid, COOLER_BUS);
         readSetup();
         esp_mqtt_client_handle_t client = mqtt_app_start(chipid);
         sntp_start();
+        debug_init(client, appname, chipid);
+
         ESP_LOGI(TAG, "[APP] All init done, app_main, last line.");
 
         sprintf(statisticsTopic,"%s/%s/%x%x%x/statistics",
@@ -858,59 +754,82 @@ void app_main(void)
         sprintf(elpriceTopic,"%s/elprice/#", comminfo->mqtt_prefix);
 
         program_version = ota_init(comminfo->mqtt_prefix, appname, chipid);
-        // it is very propable, we will not get correct timestamp here.
-        // It takes some time to get correct timestamp from ntp.
-        prevStatsTs = now = started;
+        prevStatsTs = 0;
 
+        if (!statistics_init(comminfo->mqtt_prefix, appname, chipid))
+        {
+            ESP_LOGE(TAG,"failed in statistics init");
+        }
         ESP_LOGI(TAG, "gpios: mqtt=%d wlan=%d",MQTTSTATUS_GPIO,WLANSTATUS_GPIO);
+
         while (1)
         {
             struct measurement meas;
             // several things should be running before we acknowledge the ota image is well behaving.
-            if ((now - started > 20) &&
-                 (healthyflags == (HEALTHYFLAGS_WIFI | HEALTHYFLAGS_MQTT | HEALTHYFLAGS_NTP | HEALTHYFLAGS_TEMP)))
+            time(&now);
+            if ((now - statistics_getptr()->started > 20) &&
+                (healthyflags == (HEALTHYFLAGS_WIFI | HEALTHYFLAGS_MQTT | HEALTHYFLAGS_NTP | HEALTHYFLAGS_TEMP)))
             {
                 ota_cancel_rollback();
             }
-            if(xQueueReceive(evt_queue, &meas, STATISTICS_INTERVAL * 1000 / portTICK_PERIOD_MS)) {
+
+            if (now > MIN_EPOCH)
+            {
+                if (statistics_getptr()->started < MIN_EPOCH)
+                {
+                    statistics_getptr()->started = now;
+                }
+                if (now - prevStatsTs >= STATISTICS_INTERVAL)
+                {
+                    if (isConnected)
+                    {
+                        statistics_send(client);
+                        prevStatsTs = now;
+                    }
+                }
+            }
+            if(xQueueReceive(evt_queue, &meas, STATISTICS_INTERVAL * 1000 / portTICK_PERIOD_MS)) 
+            {
                 time(&now);
                 uint16_t qcnt = uxQueueMessagesWaiting(evt_queue);
-                if (started < MIN_EPOCH)
+                if (qcnt > statistics_getptr()->maxQElements)
                 {
-                    prevStatsTs = started = now;
-                    if (isConnected) sendStatistics(client, chipid , now);
+                    statistics_getptr()->maxQElements = qcnt;
                 }
-                if (qcnt > maxQElements)
-                {
-                    maxQElements = qcnt;
-                }
-                if (now - prevStatsTs >= STATISTICS_INTERVAL) {
-                    if (isConnected) sendStatistics(client, chipid, now);
-                    prevStatsTs = now;
-                }
+
                 switch (meas.id) {
                     case TEMPERATURE:
                     {
                         char *sensorid = temperature_getsensor(meas.gpio);
                         if (sensorid != NULL)
                         {
+                            ESP_LOGI(TAG,"comparing %s == %s", setup.fridgesensor, sensorid);
+                            debug_printf("comparing sensor %s vs %s", setup.fridgesensor, sensorid);
                             if (!strcmp(setup.fridgesensor,sensorid))
                             {
+                                debug_printf("cooler_check called");
                                 cooler_check(meas.data.temperature);
                             }
-                            if (isConnected) temperature_send(comminfo->mqtt_prefix, &meas, client);
+                            if (isConnected) 
+                            {
+                                debug_printf("sending temperature");
+                                temperature_send(comminfo->mqtt_prefix, &meas, client);
+                            }    
                         }
                         healthyflags |= HEALTHYFLAGS_TEMP;
                     }
                     break;
 
                     case STATE:
-                        if (isConnected) cooler_publish(&meas, client);
+                        if (isConnected) 
+                        {
+                            cooler_publish(&meas, client);
+                            statistics_getptr()->sendcnt++;
+                        }    
                     break;
 
                     case OTA:
                         ota_status_publish(&meas, client);
-                        sendcnt++;
                     break;
 
                     default:
@@ -920,11 +839,9 @@ void app_main(void)
             else
             {   // timeout
                 ESP_LOGI(TAG,"timeout");
-                time(&now);
-                if (isConnected) sendStatistics(client, chipid, now);
-                prevStatsTs = now;
             }
         }
     }
     cooler_cleanup();
 }
+

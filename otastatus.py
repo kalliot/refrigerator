@@ -10,6 +10,7 @@ from queue import Queue, Empty
 import paho.mqtt.client as mqtt 
 
 
+
 def processData(data, filelen):
 
     if data['id'] == "otastatus":
@@ -42,7 +43,8 @@ def on_message(client, userdata, message):
     msgqueue.put(message.payload)
 
 
-def on_connect(client, userdata, flags, rc, properties):
+#def on_connect(client, userdata, flags, rc, properties):
+def on_connect(client, userdata, flags, rc):
     global connected
     if (rc==0):
         connected = True
@@ -69,8 +71,8 @@ fsize = int(sys.argv[3])
 msgqueue = Queue(maxsize=10)
 
 
-#client = mqtt.Client("otastatus" + str(os.getpid()))
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+client = mqtt.Client("otastatus" + str(os.getpid()))
+#client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2),"otastatus" + str(os.getpid())
 client.on_connect = on_connect
 client.on_message = on_message
 client.on_disconnect = on_disconnect
