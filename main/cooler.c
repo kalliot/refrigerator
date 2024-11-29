@@ -14,7 +14,6 @@
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "homeapp.h"
-#include "debug.h"
 #include "cooler.h"
 
 
@@ -65,7 +64,6 @@ void cooler_check(float temperature)
     if (temperature > startTemp && state == false)
     {
         ESP_LOGI(TAG,"temperature bigger than %f -> state=true", startTemp);
-        debug_printf("temperature bigger than %f -> state=true", startTemp);
         started = now;
         state = true;
     }
@@ -75,13 +73,11 @@ void cooler_check(float temperature)
         if (runtime > minTime)
         {
             ESP_LOGI(TAG,"temperature is smaller than %f -> state=false", startTemp - hysteresis);
-            debug_printf("temperature is smaller than %f -> state=false", startTemp - hysteresis);
             state = false;
         }
         else
         {
             ESP_LOGI(TAG,"runtime is only %d seconds, keeping compressor on", runtime);
-            debug_printf("runtime is only %d seconds, keeping compressor on", runtime);
             return;
         }
     }

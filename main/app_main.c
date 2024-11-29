@@ -40,7 +40,6 @@
 #include "apwebserver/server.h"
 #include "factoryreset.h"
 #include "statistics/statistics.h"
-#include "debug.h"
 
 #define TEMP_BUS 27
 #define COOLER_BUS 16
@@ -102,7 +101,7 @@ struct config setup =
 
 struct netinfo *comminfo;
 QueueHandle_t evt_queue = NULL;
-char jsondata[256];
+char jsondata[512];
 uint16_t sendcnt = 0;
 
 static const char *TAG = "REFRIGERATOR";
@@ -527,23 +526,25 @@ static void sendSetup(esp_mqtt_client_handle_t client, uint8_t *chipid)
                 setup.fridgesensor);
     statistics_getptr()->sendcnt++;
 
+    sprintf(setupTopic,"%s/%s/%x%x%x/tempsensors",
+        comminfo->mqtt_prefix, appname, chipid[3],chipid[4],chipid[5]);
+    sprintf(jsondata, "{\"dev\":\"%x%x%x\",\"id\":\"tempsensors\",\"names\":[",
+        chipid[3],chipid[4],chipid[5]);
+
+    char sensorname[40];
     for (int i = 0; ; i++)
     {
         char *sensoraddr = temperature_getsensor(i);
 
         if (sensoraddr == NULL) break;
-        sprintf(setupTopic,"%s/%s/%x%x%x/sensorfriendlyname/%s",
-        comminfo->mqtt_prefix, appname, chipid[3],chipid[4],chipid[5], sensoraddr);
-
-        char *friendlyname = temperature_get_friendlyname(i);
-        if (friendlyname == NULL) friendlyname = "null";
-        sprintf(jsondata, "{\"dev\":\"%x%x%x\",\"id\":\"sensorfriendlyname\",\"sensor\":\"%s\",\"name\":\"%s\"}",
-                    chipid[3],chipid[4],chipid[5],
-                    sensoraddr, friendlyname);
-
-        esp_mqtt_client_publish(client, setupTopic, jsondata , 0, 0, 1);
-        statistics_getptr()->sendcnt++;
+        sprintf(sensorname,"{\"addr\":\"%s\",\"name\":\"%s\"},",
+            sensoraddr, temperature_get_friendlyname(i));
+        strcat(jsondata,sensorname);
     }
+    jsondata[strlen(jsondata)-1] = 0; // cut last comma
+    strcat(jsondata,"]}");
+    esp_mqtt_client_publish(client, setupTopic, jsondata , 0, 0, 1);
+    statistics_getptr()->sendcnt++;
     gpio_set_level(BLINK_GPIO, false);
 }
 
@@ -737,7 +738,6 @@ void app_main(void)
         readSetup();
         esp_mqtt_client_handle_t client = mqtt_app_start(chipid);
         sntp_start();
-        debug_init(client, appname, chipid);
 
         ESP_LOGI(TAG, "[APP] All init done, app_main, last line.");
 
@@ -804,15 +804,12 @@ void app_main(void)
                         if (sensorid != NULL)
                         {
                             ESP_LOGI(TAG,"comparing %s == %s", setup.fridgesensor, sensorid);
-                            debug_printf("comparing sensor %s vs %s", setup.fridgesensor, sensorid);
                             if (!strcmp(setup.fridgesensor,sensorid))
                             {
-                                debug_printf("cooler_check called");
                                 cooler_check(meas.data.temperature);
                             }
                             if (isConnected) 
                             {
-                                debug_printf("sending temperature");
                                 temperature_send(comminfo->mqtt_prefix, &meas, client);
                             }    
                         }
