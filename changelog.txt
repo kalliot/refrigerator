@@ -6,4 +6,4 @@
         before acknowledging it. The name <refrigerator> in mosquitto topics
 	is taken by an api call. So it is not needed to be hardcoded in source
 	anymore.
-
+0.0.0.16 - Fixed info message bug. Ota status reply has now errortext field.

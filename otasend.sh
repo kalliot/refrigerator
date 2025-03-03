@@ -18,12 +18,12 @@ DEVICE="fd9030"
 cat sdkconfig | grep 'CONFIG_APP_PROJECT_VER=' > vernum.tmp
 . ./vernum.tmp
 FNAME="refrigerator_$CONFIG_APP_PROJECT_VER"
+message='{"id":"otafileschanged","name":'\"${FNAME}\"'}'
 echo $FNAME
 sftp pi@192.168.101.233 << EOF
 cd srv/ota
 put build/refrigerator.bin $FNAME
 EOF
-
 FILESIZE="$(stat -c%s build/refrigerator.bin)"
-python otastatus.py $DEVICE $FNAME $FILESIZE
+mosquitto_pub -h 192.168.101.231 -t 'home/kallio/otafileschanged' -m $message
 
